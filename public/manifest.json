@@ -1,0 +1,9 @@
+{
+  "name": "RemitTrack",
+  "short_name": "RemitTrack",
+  "description": "Privacy-first remittance tracker. Your data never leaves your device.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F5F4FA",
+  "theme_color": "#5B4ED4"
+}
