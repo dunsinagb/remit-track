@@ -1,11 +1,12 @@
 "use client"
 
-import { useState, useMemo, useRef } from "react"
+import { useState, useMemo, useRef, useEffect } from "react"
 import type { Transaction, Purpose } from "@/lib/types"
 import { PASTEL_COLORS, CATEGORY_CARD_COLORS } from "@/lib/types"
-import { ArrowLeft, Download, LayoutGrid, Circle, Calendar, TrendingUp, TrendingDown } from "lucide-react"
+import { ArrowLeft, Download, LayoutGrid, Circle, Calendar, TrendingUp, TrendingDown, Settings, Sparkles } from "lucide-react"
 import { toPng } from "html-to-image"
 import { toast } from "sonner"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 
 type ViewMode = "grid" | "swarm" | "bubbles"
 
@@ -103,7 +104,7 @@ function buildPeriods(transactions: Transaction[]): TimePeriod[] {
   return periods
 }
 
-function summarize(transactions: Transaction[]): GridItem[] {
+function summarize(transactions: Transaction[], monthSpan: number): GridItem[] {
   const map = new Map<string, { total: number; count: number; subs: Set<string> }>()
   const grandTotal = transactions.reduce((s, t) => s + t.amount, 0)
 
@@ -121,13 +122,18 @@ function summarize(transactions: Transaction[]): GridItem[] {
   }
 
   return Array.from(map.entries())
-    .map(([name, data]) => ({
-      name,
-      totalSent: data.total,
-      count: data.count,
-      percentage: grandTotal > 0 ? Math.round((data.total / grandTotal) * 100) : 0,
-      sublabel: `${data.subs.size} ${data.subs.size === 1 ? "person" : "people"}`,
-    }))
+    .map(([name, data]) => {
+      const monthlyAvg = data.total / monthSpan
+      const yearlyProjection = monthlyAvg * 12
+
+      return {
+        name,
+        totalSent: data.total,
+        count: data.count,
+        percentage: grandTotal > 0 ? Math.round((data.total / grandTotal) * 100) : 0,
+        sublabel: `~$${fmt(yearlyProjection)}/yr`,
+      }
+    })
     .sort((a, b) => b.totalSent - a.totalSent)
 }
 
@@ -283,26 +289,53 @@ function categoryIcon(name: string) { return CATEGORY_EMOJI[name] || "\u{1F4CC}"
 function packCircles(items: GridItem[], width: number, height: number) {
   if (items.length === 0) return []
   const maxAmount = Math.max(...items.map((i) => i.totalSent))
-  const minR = 28
-  const maxR = Math.min(width, height) * 0.22
-
-  const circles = items.map((item, i) => {
-    const ratio = item.totalSent / maxAmount
-    const r = minR + (maxR - minR) * Math.sqrt(ratio)
-    return { item, r, x: width / 2, y: height / 2, color: getItemColor(item, i) }
-  })
+  const minR = 24
+  const maxR = Math.min(width, height) * 0.16
 
   const cx = width / 2
   const cy = height / 2
-  for (let iter = 0; iter < 120; iter++) {
+
+  // Sort items by size (largest first) and create circles
+  const sortedItems = items
+    .map((item, originalIndex) => ({ item, originalIndex }))
+    .sort((a, b) => b.item.totalSent - a.item.totalSent)
+
+  const circles = sortedItems.map((data, i) => {
+    const ratio = data.item.totalSent / maxAmount
+    const r = minR + (maxR - minR) * Math.sqrt(ratio)
+
+    // Place largest circle at center, others in a spiral pattern
+    let x, y
+    if (i === 0) {
+      x = cx
+      y = cy
+    } else {
+      const angle = (i / sortedItems.length) * Math.PI * 2
+      const spiralRadius = 60 + (i * 15)
+      x = cx + Math.cos(angle) * spiralRadius
+      y = cy + Math.sin(angle) * spiralRadius
+    }
+
+    return {
+      item: data.item,
+      r,
+      x,
+      y,
+      color: getItemColor(data.item, data.originalIndex)
+    }
+  })
+
+  for (let iter = 0; iter < 300; iter++) {
     for (let i = 0; i < circles.length; i++) {
-      circles[i].x += (cx - circles[i].x) * 0.02
-      circles[i].y += (cy - circles[i].y) * 0.02
+      // Very weak centering force - only to keep pack from drifting
+      circles[i].x += (cx - circles[i].x) * 0.005
+      circles[i].y += (cy - circles[i].y) * 0.005
+
       for (let j = i + 1; j < circles.length; j++) {
         const dx = circles[j].x - circles[i].x
         const dy = circles[j].y - circles[i].y
         const dist = Math.sqrt(dx * dx + dy * dy) || 1
-        const minDist = circles[i].r + circles[j].r + 4
+        const minDist = circles[i].r + circles[j].r + 8
         if (dist < minDist) {
           const push = (minDist - dist) / 2
           const nx = dx / dist
@@ -313,8 +346,8 @@ function packCircles(items: GridItem[], width: number, height: number) {
           circles[j].y += ny * push
         }
       }
-      circles[i].x = Math.max(circles[i].r + 4, Math.min(width - circles[i].r - 4, circles[i].x))
-      circles[i].y = Math.max(circles[i].r + 4, Math.min(height - circles[i].r - 4, circles[i].y))
+      circles[i].x = Math.max(circles[i].r + 16, Math.min(width - circles[i].r - 16, circles[i].x))
+      circles[i].y = Math.max(circles[i].r + 16, Math.min(height - circles[i].r - 16, circles[i].y))
     }
   }
   return circles
@@ -342,15 +375,99 @@ export function GridPage({ transactions, onBack }: GridPageProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("grid")
   const [periodKey, setPeriodKey] = useState("all")
   const [showPeriodPicker, setShowPeriodPicker] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
+  const [selectedCurrency, setSelectedCurrency] = useState("USD")
+  const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({})
+  const [loadingRates, setLoadingRates] = useState(false)
   const gridRef = useRef<HTMLDivElement>(null)
+
+  // Currency symbols mapping
+  const CURRENCY_SYMBOLS: Record<string, string> = {
+    USD: "$",
+    EUR: "€",
+    GBP: "£",
+    NGN: "₦",
+    GHS: "₵",
+    KES: "KSh",
+    ZAR: "R",
+    CAD: "C$",
+    AUD: "A$",
+    INR: "₹",
+    JPY: "¥",
+    CNY: "¥",
+  }
+
+  // Fetch exchange rates on mount
+  useEffect(() => {
+    const fetchRates = async () => {
+      setLoadingRates(true)
+      try {
+        const response = await fetch(
+          'https://v6.exchangerate-api.com/v6/95b18d8324f589dcb2ad1a43/latest/USD'
+        )
+        const data = await response.json()
+        if (data.conversion_rates) {
+          setExchangeRates(data.conversion_rates)
+        }
+      } catch (error) {
+        console.error('Failed to fetch exchange rates:', error)
+        toast.error('Failed to load exchange rates')
+      } finally {
+        setLoadingRates(false)
+      }
+    }
+    fetchRates()
+  }, [])
+
+  // Load saved currency preference
+  useEffect(() => {
+    const saved = localStorage.getItem('remittrack-currency')
+    if (saved) {
+      setSelectedCurrency(saved)
+    }
+  }, [])
+
+  // Persist currency selection
+  useEffect(() => {
+    localStorage.setItem('remittrack-currency', selectedCurrency)
+  }, [selectedCurrency])
+
+  // Convert amount from USD to selected currency
+  const convertCurrency = (amountUSD: number): number => {
+    if (selectedCurrency === 'USD' || !exchangeRates[selectedCurrency]) {
+      return amountUSD
+    }
+    return amountUSD * exchangeRates[selectedCurrency]
+  }
+
+  // Format currency with symbol
+  const formatCurrency = (amount: number): string => {
+    const symbol = CURRENCY_SYMBOLS[selectedCurrency] || selectedCurrency
+    const converted = convertCurrency(amount)
+    const decimals = ['JPY', 'KRW'].includes(selectedCurrency) ? 0 : 2
+
+    return `${symbol}${converted.toLocaleString(undefined, {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals
+    })}`
+  }
 
   const periods = useMemo(() => buildPeriods(transactions), [transactions])
   const activePeriod = periods.find((p) => p.key === periodKey) || periods[0]
 
   const filtered = useMemo(() => transactions.filter(activePeriod.filter), [transactions, activePeriod])
-  const items = useMemo(() => summarize(filtered), [filtered])
+
+  const dates = useMemo(() => filtered.map((t) => new Date(t.date)), [filtered])
+  const minDate = dates.length > 0 ? new Date(Math.min(...dates.map((d) => d.getTime()))) : new Date()
+  const maxDate = dates.length > 0 ? new Date(Math.max(...dates.map((d) => d.getTime()))) : new Date()
+  const monthSpan = useMemo(
+    () => Math.max(1, (maxDate.getFullYear() - minDate.getFullYear()) * 12 + (maxDate.getMonth() - minDate.getMonth()) + 1),
+    [minDate, maxDate]
+  )
+
+  const items = useMemo(() => summarize(filtered, monthSpan), [filtered, monthSpan])
   const gridLayout = useMemo(() => computeGridLayout(items), [items])
-  const bubbles = useMemo(() => packCircles(items, 340, 340), [items])
+  const bubbles = useMemo(() => packCircles(items, 500, 380), [items])
   const totalAmount = filtered.reduce((s, t) => s + t.amount, 0)
 
   const comparison = useMemo<Comparison | null>(() => {
@@ -359,23 +476,26 @@ export function GridPage({ transactions, onBack }: GridPageProps) {
     return computeComparison(filtered, priorTxns, activePeriod.priorLabel)
   }, [transactions, filtered, activePeriod])
 
-  const dates = filtered.map((t) => new Date(t.date))
-  const minDate = dates.length > 0 ? new Date(Math.min(...dates.map((d) => d.getTime()))) : new Date()
-  const maxDate = dates.length > 0 ? new Date(Math.max(...dates.map((d) => d.getTime()))) : new Date()
-  const monthSpan = Math.max(1, (maxDate.getFullYear() - minDate.getFullYear()) * 12 + (maxDate.getMonth() - minDate.getMonth()) + 1)
   const monthlyAvg = totalAmount / monthSpan
   const yearlyProjection = monthlyAvg * 12
 
   const handleExport = async () => {
     if (!gridRef.current) return
     try {
-      const dataUrl = await toPng(gridRef.current, { backgroundColor: "#F8FAFC", pixelRatio: 3 })
+      toast.info("Generating image...")
+      const dataUrl = await toPng(gridRef.current, {
+        backgroundColor: "#FFFFFF",
+        pixelRatio: 2,
+        cacheBust: true,
+      })
       const link = document.createElement("a")
-      link.download = "remittrack-categories.png"
+      link.download = `remittrack-${viewMode}-${new Date().getTime()}.png`
       link.href = dataUrl
       link.click()
-      toast.success("Exported as PNG")
-    } catch {
+      toast.success("Exported as PNG!")
+    } catch (error) {
+      console.error("Export failed:", error)
+      toast.error("Export failed. Trying CSV fallback...")
       const csvRows = ["Category,Amount,Percentage,Transfers"]
       for (const r of items) csvRows.push(`"${r.name}",${r.totalSent},${r.percentage}%,${r.count}`)
       const blob = new Blob([csvRows.join("\n")], { type: "text/csv" })
@@ -393,9 +513,9 @@ export function GridPage({ transactions, onBack }: GridPageProps) {
   const getCatComparison = (name: string) => comparison?.byCategory.get(name) ?? null
 
   return (
-    <div className="max-w-4xl mx-auto px-4 pb-8">
+    <div className="max-w-xl mx-auto px-4 pb-16 pt-12">
       {/* View mode switcher */}
-      <div className="flex items-center justify-between mt-6 animate-fade-up">
+      <div className="flex items-center justify-between mb-12 animate-fade-up">
         <div className="inline-flex rounded-2xl bg-white p-1.5 gap-1" style={{ boxShadow: "0 0 0 1px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.04)" }}>
           {([
             { key: "grid" as ViewMode, icon: LayoutGrid, label: "Grid" },
@@ -452,11 +572,11 @@ export function GridPage({ transactions, onBack }: GridPageProps) {
       )}
 
       {/* Visualization */}
-      <div ref={gridRef} className="mt-4 rounded-3xl bg-white p-3 animate-fade-up-1" style={{ boxShadow: "0 0 0 1px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.04)" }}>
+      <div ref={gridRef} className="mt-4 rounded-3xl p-4 animate-fade-up-1" style={{ boxShadow: "0 0 0 1px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.04)", background: "linear-gradient(180deg, #FEFEFE 0%, #FAFBFF 100%)" }}>
         {/* GRID VIEW */}
         {viewMode === "grid" && (
           <div
-            className="grid gap-1.5"
+            className="grid gap-2.5"
             style={{
               gridTemplateColumns: "repeat(3, 1fr)",
               gridTemplateRows: `repeat(${gridLayout.maxRow}, 1fr)`,
@@ -467,19 +587,18 @@ export function GridPage({ transactions, onBack }: GridPageProps) {
               return (
                 <div
                   key={cell.item.name}
-                  className="rounded-2xl p-3 flex flex-col justify-between transition-all hover:scale-[1.01]"
+                  className="rounded-2xl p-4 flex flex-col justify-between transition-all duration-200 cursor-pointer hover:scale-[1.02] hover:shadow-lg"
                   style={{
                     gridRow: `${cell.row} / span ${cell.rowSpan}`,
                     gridColumn: `${cell.col} / span ${cell.colSpan}`,
-                    backgroundColor: cell.color.bg,
-                    border: `1px solid ${cell.color.accent}`,
-                    minHeight: cell.rowSpan > 1 ? "160px" : "80px",
+                    background: `linear-gradient(135deg, rgba(255,255,255,0.4) 0%, ${cell.color.bg} 100%)`,
+                    minHeight: cell.rowSpan > 1 ? "180px" : "90px",
                   }}
                 >
                   {cell.rowSpan > 1 ? (
                     <>
                       <div className="flex items-start justify-between">
-                        <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl"
+                        <div className="w-11 h-11 rounded-xl flex items-center justify-center text-xl"
                           style={{ backgroundColor: cell.color.accent, color: cell.color.text }}>
                           {getIcon(cell.item)}
                         </div>
@@ -490,30 +609,33 @@ export function GridPage({ transactions, onBack }: GridPageProps) {
                       </div>
                       <div>
                         <p className="text-sm font-semibold" style={{ color: cell.color.text }}>{cell.item.name}</p>
-                        <p className="text-2xl font-bold mt-0.5 tabular-nums" style={{ color: cell.color.text }}>
+                        <p className="text-2xl font-bold mt-1 tabular-nums" style={{ color: cell.color.text }}>
                           ${fmt(cell.item.totalSent)}
                         </p>
-                        <p className="text-[11px] mt-1 opacity-60" style={{ color: cell.color.text }}>{cell.item.sublabel}</p>
+                        <p className="text-[11px] mt-1.5 opacity-60" style={{ color: cell.color.text }}>{cell.item.sublabel}</p>
                       </div>
                     </>
                   ) : (
-                    <div className="flex flex-col items-center justify-center h-full text-center py-1 relative">
-                      {catComp && (
-                        <div className="absolute top-0 right-0">
-                          <ComparisonBadge changePct={catComp.changePct} direction={catComp.direction} />
+                    <>
+                      <div className="flex items-start justify-between">
+                        <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm"
+                          style={{ backgroundColor: cell.color.accent, color: cell.color.text }}>
+                          {getIcon(cell.item)}
                         </div>
-                      )}
-                      <div className="w-8 h-8 rounded-lg flex items-center justify-center text-lg mb-1"
-                        style={{ backgroundColor: cell.color.accent, color: cell.color.text }}>
-                        {getIcon(cell.item)}
+                        <div className="flex items-center gap-1">
+                          {catComp && <ComparisonBadge changePct={catComp.changePct} direction={catComp.direction} />}
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full" style={{ backgroundColor: cell.color.accent, color: cell.color.text }}>{cell.item.percentage}%</span>
+                        </div>
                       </div>
-                      <p className="text-[11px] font-semibold truncate w-full" style={{ color: cell.color.text }}>
-                        {cell.item.name}
-                      </p>
-                      <p className="text-sm font-bold tabular-nums" style={{ color: cell.color.text }}>
-                        ${fmt(cell.item.totalSent)}
-                      </p>
-                    </div>
+                      <div>
+                        <p className="text-[11px] font-semibold truncate" style={{ color: cell.color.text }}>
+                          {cell.item.name}
+                        </p>
+                        <p className="text-sm font-bold tabular-nums" style={{ color: cell.color.text }}>
+                          ${fmt(cell.item.totalSent)}
+                        </p>
+                      </div>
+                    </>
                   )}
                 </div>
               )
@@ -524,41 +646,91 @@ export function GridPage({ transactions, onBack }: GridPageProps) {
         {/* SWARM VIEW */}
         {viewMode === "swarm" && (
           <div className="flex flex-col items-center">
-            <div className="relative w-full" style={{ height: "320px" }}>
-              {items.slice(0, 12).map((item, i) => {
-                const color = getItemColor(item, i)
-                const maxAmt = Math.max(...items.map((it) => it.totalSent))
-                const sizeRatio = Math.sqrt(item.totalSent / maxAmt)
-                const size = 32 + sizeRatio * 40
+            <div className="relative w-full rounded-xl overflow-hidden" style={{ height: "400px", backgroundColor: "#F1F5F9" }}>
+              {/* Average reference line */}
+              <div className="absolute left-4 right-4 border-t border-slate-300/40" style={{ top: "50%" }} />
 
-                const cols = Math.min(items.length, 4)
-                const row = Math.floor(i / cols)
-                const col = i % cols
-                const totalRows = Math.ceil(Math.min(items.length, 12) / cols)
-                const xOffset = ((col + 0.5) / cols) * 100
-                const yOffset = ((row + 0.5) / totalRows) * 100
+              {items.slice(0, 12).sort((a, b) => a.totalSent - b.totalSent).map((item, i) => {
+                const originalIndex = items.findIndex(it => it.name === item.name)
+                const color = getItemColor(item, originalIndex)
+                const maxAmt = Math.max(...items.map((it) => it.totalSent))
+                const itemMonthlyAvg = item.totalSent / monthSpan
+                const sizeRatio = Math.sqrt(item.totalSent / maxAmt)
+                const size = 36 + sizeRatio * 36
+
+                const n = Math.min(items.length, 12)
+                const xOffset = ((i + 0.5) / Math.min(n, 6)) * 100
+                const row = Math.floor(i / 6)
+
+                // Alternating above/below pattern to ensure both zones are populated
+                // Even indices (0, 2, 4, 6, 8, 10) → above the line
+                // Odd indices (1, 3, 5, 7, 9, 11) → below the line
+                const ABOVE_MIN = 15  // 15% from top
+                const ABOVE_MAX = 45  // to 45% (just above center line)
+                const BELOW_MIN = 55  // 55% from top (just below center line)
+                const BELOW_MAX = 85  // to 85%
+
+                // Calculate value range for all displayed items
+                const displayedItems = items.slice(0, 12).sort((a, b) => a.totalSent - b.totalSent)
+                const displayedValues = displayedItems.map(it => (it.totalSent / monthSpan))
+                const minValue = Math.min(...displayedValues)
+                const maxValue = Math.max(...displayedValues)
+                const valueRange = maxValue - minValue || 1  // Prevent division by zero
+
+                // Normalize item's value within the overall range (0 to 1)
+                const normalizedValue = (itemMonthlyAvg - minValue) / valueRange
+
+                // Alternate between above/below zones based on index
+                const isEvenIndex = i % 2 === 0
+                const zone = isEvenIndex ? [ABOVE_MIN, ABOVE_MAX] : [BELOW_MIN, BELOW_MAX]
+                const yOffset = zone[0] + normalizedValue * (zone[1] - zone[0])
 
                 return (
                   <div
                     key={item.name}
-                    className="absolute flex flex-col items-center transition-all duration-500"
-                    style={{ left: `${xOffset}%`, top: `${yOffset}%`, transform: "translate(-50%, -50%)" }}
+                    className="absolute flex flex-col items-center transition-all duration-500 group"
+                    style={{ left: `${Math.min(Math.max(xOffset, 10), 90)}%`, top: `${Math.min(Math.max(yOffset, 8), 70)}%`, transform: "translate(-50%, -50%)", zIndex: 10 }}
                   >
+                    {/* Tooltip with 2 rows on hover - always above circle */}
                     <div
-                      className="rounded-full flex items-center justify-center font-bold text-xl"
+                      className="absolute opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity duration-200 z-20"
+                      style={{
+                        left: xOffset < 25 ? 'auto' : xOffset > 75 ? 'auto' : '50%',
+                        right: xOffset > 75 ? '0' : 'auto',
+                        bottom: '100%',
+                        transform: xOffset >= 25 && xOffset <= 75 ? 'translateX(-50%)' : 'none',
+                        marginBottom: '8px'
+                      }}
+                    >
+                      <div className="bg-slate-900 text-white rounded-lg px-3 py-2 shadow-lg">
+                        <p className="text-xs font-semibold whitespace-nowrap leading-tight">
+                          {item.name}
+                        </p>
+                        <p className="text-[11px] text-slate-300 whitespace-nowrap leading-tight mt-0.5">
+                          ${fmt(item.totalSent / monthSpan)}/mo
+                        </p>
+                      </div>
+                      <div className="w-2 h-2 bg-slate-900 rotate-45 mx-auto -mt-1" />
+                    </div>
+                    <div
+                      className="rounded-full flex items-center justify-center font-bold text-xl transition-transform duration-200 hover:scale-110"
                       style={{
                         width: size, height: size,
                         backgroundColor: color.bg, color: color.text,
-                        border: `2px solid ${color.accent}`,
+                        border: `2.5px solid ${color.accent}`,
+                        boxShadow: `0 2px 8px ${color.accent}40`,
                       }}
                     >
                       {getIcon(item)}
                     </div>
-                    <p className="text-[10px] font-semibold text-slate-600 mt-1 text-center max-w-[60px] truncate">{item.name}</p>
-                    <p className="text-[10px] font-bold text-slate-400 tabular-nums">${fmt(item.totalSent)}</p>
                   </div>
                 )
               })}
+
+              {/* Monthly Amount label inside container */}
+              <p className="absolute bottom-3 left-0 right-0 text-center text-[10px] font-semibold text-slate-400 tracking-[0.2em] uppercase">
+                Monthly Amount
+              </p>
             </div>
           </div>
         )}
@@ -566,69 +738,226 @@ export function GridPage({ transactions, onBack }: GridPageProps) {
         {/* BUBBLES VIEW */}
         {viewMode === "bubbles" && (
           <div className="flex flex-col items-center">
-            <div className="relative" style={{ width: "340px", height: "340px" }}>
-              {bubbles.map((b) => (
-                <div
-                  key={b.item.name}
-                  className="absolute flex flex-col items-center justify-center rounded-full transition-all duration-500"
-                  style={{
-                    width: b.r * 2, height: b.r * 2,
-                    left: b.x - b.r, top: b.y - b.r,
-                    backgroundColor: b.color.bg,
-                    border: `2px solid ${b.color.accent}`,
-                  }}
-                >
+            <div className="relative w-full rounded-xl overflow-hidden" style={{ height: "400px", backgroundColor: "#F1F5F9" }}>
+              {bubbles.map((b) => {
+                const perMonth = b.item.totalSent / monthSpan
+                const d = b.r * 2
+                const pctX = (b.x / 500) * 100
+                const pctY = (b.y / 380) * 100
+                const pctR = (b.r / 500) * 100
+
+                // Calculate responsive font sizes based on radius
+                const nameFontSize = Math.max(8, Math.min(b.r * 0.2, 12))
+                const priceFontSize = Math.max(9, Math.min(b.r * 0.24, 14))
+                const iconFontSize = Math.max(b.r * 0.5, 14)
+
+                // Three tiers: icon+name+price, name+price only, icon only
+                const showIconNamePrice = b.r >= 50
+                const showNamePrice = b.r >= 35 && b.r < 50
+                const showIconOnly = b.r < 35
+
+                return (
                   <div
-                    className="rounded-full flex items-center justify-center font-bold text-lg"
+                    key={b.item.name}
+                    className="absolute flex flex-col items-center justify-center rounded-full transition-all duration-200 group cursor-pointer hover:scale-105 hover:z-50"
                     style={{
-                      width: Math.max(b.r * 0.6, 20), height: Math.max(b.r * 0.6, 20),
-                      backgroundColor: b.color.accent, color: b.color.text,
+                      width: `${pctR * 2}%`, aspectRatio: "1",
+                      left: `${pctX}%`, top: `${pctY}%`,
+                      transform: "translate(-50%, -50%)",
+                      background: `linear-gradient(135deg, ${b.color.bg} 0%, ${b.color.accent} 100%)`,
+                      border: `3px solid ${b.color.accent}`,
+                      willChange: "transform",
+                      WebkitTapHighlightColor: "transparent",
                     }}
                   >
-                    {getIcon(b.item)}
+                    {/* Tooltip with 2 rows on hover - always above circle */}
+                    <div
+                      className="absolute opacity-0 group-hover:opacity-100 group-active:opacity-100 pointer-events-none transition-opacity duration-200 z-20"
+                      style={{
+                        left: pctX < 25 ? 'auto' : pctX > 75 ? 'auto' : '50%',
+                        right: pctX > 75 ? '0' : 'auto',
+                        bottom: '100%',
+                        transform: pctX >= 25 && pctX <= 75 ? 'translateX(-50%)' : 'none',
+                        marginBottom: '8px'
+                      }}
+                    >
+                      <div className="bg-slate-900 text-white rounded-lg px-3 py-2 shadow-lg">
+                        <p className="text-xs font-semibold whitespace-nowrap leading-tight">
+                          {b.item.name}
+                        </p>
+                        <p className="text-[11px] text-slate-300 whitespace-nowrap leading-tight mt-0.5">
+                          ${fmt(perMonth)}/mo
+                        </p>
+                      </div>
+                      <div className="w-2 h-2 bg-slate-900 rotate-45 mx-auto -mt-1" />
+                    </div>
+
+                    {/* Large circles: Show icon + name + price */}
+                    {showIconNamePrice && (
+                      <>
+                        <span style={{ fontSize: `${iconFontSize}px`, color: b.color.text }}>
+                          {getIcon(b.item)}
+                        </span>
+                        <p className="font-semibold text-center leading-tight mt-1 px-2" style={{
+                          color: b.color.text,
+                          fontSize: `${nameFontSize}px`,
+                          maxWidth: d * 0.8,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap"
+                        }}>
+                          {b.item.name}
+                        </p>
+                        <p className="font-bold tabular-nums" style={{
+                          color: b.color.text,
+                          fontSize: `${priceFontSize}px`
+                        }}>
+                          ${fmt(perMonth)}
+                        </p>
+                      </>
+                    )}
+
+                    {/* Medium circles: Show name + price only */}
+                    {showNamePrice && (
+                      <>
+                        <p className="font-semibold text-center leading-tight px-2" style={{
+                          color: b.color.text,
+                          fontSize: `${nameFontSize}px`,
+                          maxWidth: d * 0.8,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap"
+                        }}>
+                          {b.item.name}
+                        </p>
+                        <p className="font-bold tabular-nums mt-0.5" style={{
+                          color: b.color.text,
+                          fontSize: `${priceFontSize}px`
+                        }}>
+                          ${fmt(perMonth)}
+                        </p>
+                      </>
+                    )}
+
+                    {/* Small circles: Show icon only */}
+                    {showIconOnly && (
+                      <span style={{ fontSize: `${iconFontSize}px`, color: b.color.text }}>
+                        {getIcon(b.item)}
+                      </span>
+                    )}
                   </div>
-                  {b.r > 36 && (
-                    <p className="text-[9px] font-semibold mt-0.5 text-center max-w-[60px] truncate" style={{ color: b.color.text }}>
-                      {b.item.name}
-                    </p>
-                  )}
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
+
+        {/* Summary stats inside viz card */}
+        <div className="flex items-end justify-between mt-4 rounded-xl px-5 py-4" style={{ backgroundColor: "#F1F5F9" }}>
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <p className="text-[10px] font-semibold text-slate-400 tracking-[0.15em] uppercase">Total / Month</p>
+              {selectedCurrency !== 'USD' && (
+                <span className="text-[9px] font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">
+                  {selectedCurrency}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-2xl font-bold text-slate-900 tabular-nums">{formatCurrency(monthlyAvg)}</span>
+              {comparison && <ComparisonBadge changePct={comparison.overallChangePct} direction={comparison.overallDirection} size="md" />}
+            </div>
+          </div>
+          <div className="text-right">
+            <p className="text-[10px] font-semibold text-slate-400 tracking-[0.15em] uppercase mb-1">Yearly Projection</p>
+            <span className="text-2xl font-bold text-indigo-600 tabular-nums">{formatCurrency(yearlyProjection)}</span>
+          </div>
+        </div>
       </div>
 
-      {/* Summary stats */}
-      <div className="grid grid-cols-2 gap-3 mt-4 animate-fade-up-2">
-        <div className="bg-white rounded-2xl p-4 text-center" style={{ boxShadow: "0 0 0 1px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.04)" }}>
-          <div className="text-xs text-slate-400 mb-1">Total Sent</div>
-          <div className="text-2xl font-bold text-slate-900 tabular-nums">${fmt(totalAmount)}</div>
-          {comparison && <ComparisonBadge changePct={comparison.overallChangePct} direction={comparison.overallDirection} size="md" />}
-        </div>
-        <div className="bg-white rounded-2xl p-4 text-center" style={{ boxShadow: "0 0 0 1px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.04)" }}>
-          <div className="text-xs text-slate-400 mb-1">Yearly Projection</div>
-          <div className="text-2xl font-bold text-slate-900 tabular-nums">${fmt(yearlyProjection)}</div>
-        </div>
-      </div>
+      {/* Settings Modal */}
+      <Dialog open={showSettings} onOpenChange={setShowSettings}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Settings</DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4 py-4">
+            {/* Currency Section */}
+            <div>
+              <label className="text-xs font-semibold text-slate-400 tracking-wide uppercase mb-2 block">
+                Currency
+              </label>
+              <select
+                value={selectedCurrency}
+                onChange={(e) => setSelectedCurrency(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+              >
+                <option value="USD">$ USD - US Dollar</option>
+                <option value="EUR">€ EUR - Euro</option>
+                <option value="GBP">£ GBP - British Pound</option>
+                <option value="NGN">₦ NGN - Nigerian Naira</option>
+                <option value="GHS">₵ GHS - Ghanaian Cedi</option>
+                <option value="KES">KSh KES - Kenyan Shilling</option>
+                <option value="ZAR">R ZAR - South African Rand</option>
+                <option value="CAD">C$ CAD - Canadian Dollar</option>
+                <option value="AUD">A$ AUD - Australian Dollar</option>
+                <option value="INR">₹ INR - Indian Rupee</option>
+                <option value="JPY">¥ JPY - Japanese Yen</option>
+                <option value="CNY">¥ CNY - Chinese Yuan</option>
+              </select>
+              <p className="text-xs text-slate-400 mt-2">
+                All prices will be converted using approximate exchange rates
+              </p>
+            </div>
+
+            {/* Future settings sections can go here */}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Bottom bar */}
-      <div className="flex items-center justify-between mt-6 animate-fade-up-3">
+      <div className="flex items-center justify-between mt-10 animate-fade-up-3 gap-3">
+        {/* Settings Icon Button */}
         <button
-          onClick={onBack}
-          className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 font-medium transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Back
-        </button>
-        <button
-          onClick={handleExport}
-          className="flex items-center gap-2 px-5 py-2.5 bg-white rounded-xl border border-slate-100 text-sm font-medium text-slate-700 hover:bg-slate-50 transition-all"
+          onClick={() => setShowSettings(true)}
+          className="w-10 h-10 rounded-full bg-white border border-slate-100 flex items-center justify-center text-slate-600 hover:text-slate-900 hover:bg-slate-50 transition-all"
           style={{ boxShadow: "0 0 0 1px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.04)" }}
         >
-          <Download className="w-4 h-4" />
-          Export
+          <Settings className="w-4 h-4" />
         </button>
+
+        {/* Back, Export, Premium Pills */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onBack}
+            className="flex items-center gap-2 px-4 py-2 rounded-full bg-white border border-slate-100 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-50 transition-all"
+            style={{ boxShadow: "0 0 0 1px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.04)" }}
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Back
+          </button>
+
+          <button
+            onClick={handleExport}
+            className="flex items-center gap-2 px-4 py-2 rounded-full bg-white border border-slate-100 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-50 transition-all"
+            style={{ boxShadow: "0 0 0 1px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.04)" }}
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export
+          </button>
+
+          <button
+            onClick={() => toast.info("Premium features coming soon! 🚀")}
+            className="flex items-center gap-2 px-4 py-2 rounded-full font-semibold text-sm text-white transition-all hover:shadow-lg hover:scale-105"
+            style={{
+              background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)"
+            }}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            Upgrade to Pro
+          </button>
+        </div>
       </div>
     </div>
   )

@@ -18,16 +18,60 @@ import {
   Zap,
   Loader2,
   Trash2,
+  Check,
+  Square,
 } from "lucide-react"
 import { toast } from "sonner"
 
 const QUICK_PROVIDERS = [
-  { name: "LemFi", domain: "lemfi.com", active: true },
-  { name: "Wise", domain: "wise.com", active: false },
-  { name: "WorldRemit", domain: "worldremit.com", active: false },
-  { name: "Remitly", domain: "remitly.com", active: false },
-  { name: "Sendwave", domain: "sendwave.com", active: false },
-  { name: "MoneyGram", domain: "moneygram.com", active: false },
+  {
+    name: "LemFi",
+    domain: "lemfi.com",
+    logo: "/logo/lemfi.JPG",
+    color: "#6CCFBD",
+    icon: "💸",
+    active: true
+  },
+  {
+    name: "Wise",
+    domain: "wise.com",
+    logo: "/logo/wise.PNG",
+    color: "#9FE870",
+    icon: "🌍",
+    active: false
+  },
+  {
+    name: "WorldRemit",
+    domain: "worldremit.com",
+    logo: "/logo/worldremit.JPG",
+    color: "#7F3FF2",
+    icon: "✈️",
+    active: false
+  },
+  {
+    name: "Remitly",
+    domain: "remitly.com",
+    logo: "/logo/remitly.PNG",
+    color: "#1E3A8A",
+    icon: "💵",
+    active: false
+  },
+  {
+    name: "Sendwave",
+    domain: "sendwave.com",
+    logo: "/logo/sendwave.PNG",
+    color: "#FFD700",
+    icon: "🌊",
+    active: false
+  },
+  {
+    name: "MoneyGram",
+    domain: "moneygram.com",
+    logo: "/logo/moneygram.PNG",
+    color: "#E31E24",
+    icon: "💰",
+    active: false
+  },
 ]
 
 interface InputPageProps {
@@ -47,6 +91,17 @@ export function InputPage({ onGenerate }: InputPageProps) {
   const [taggingPerson, setTaggingPerson] = useState<string | null>(null)
   const [expandedPerson, setExpandedPerson] = useState<string | null>(null)
   const [taggingTxnId, setTaggingTxnId] = useState<string | null>(null)
+
+  // Bulk tagging state
+  const [bulkTaggingMode, setBulkTaggingMode] = useState(false)
+  const [selectedTxnIds, setSelectedTxnIds] = useState<Set<string>>(new Set())
+
+  // Custom category state
+  const [customCategoryMode, setCustomCategoryMode] = useState<{
+    type: 'person' | 'transaction' | 'bulk'
+    id: string | null
+  } | null>(null)
+  const [customCategoryValue, setCustomCategoryValue] = useState("")
 
   const [importStats, setImportStats] = useState<{
     total: number
@@ -146,6 +201,71 @@ export function InputPage({ onGenerate }: InputPageProps) {
     )
     setTaggingTxnId(null)
     toast.success(`Transaction re-tagged as "${purpose}"`)
+  }
+
+  // Bulk tagging functions
+  const toggleBulkMode = () => {
+    setBulkTaggingMode(!bulkTaggingMode)
+    setSelectedTxnIds(new Set())
+  }
+
+  const toggleTxnSelection = (txnId: string) => {
+    setSelectedTxnIds(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(txnId)) {
+        newSet.delete(txnId)
+      } else {
+        newSet.add(txnId)
+      }
+      return newSet
+    })
+  }
+
+  const selectAllInGroup = (group: typeof grouped[0]) => {
+    setSelectedTxnIds(prev => {
+      const newSet = new Set(prev)
+      group.txns.forEach(txn => newSet.add(txn.id))
+      return newSet
+    })
+  }
+
+  const deselectAllInGroup = (group: typeof grouped[0]) => {
+    setSelectedTxnIds(prev => {
+      const newSet = new Set(prev)
+      group.txns.forEach(txn => newSet.delete(txn.id))
+      return newSet
+    })
+  }
+
+  const applyBulkPurpose = (purpose: Purpose | string) => {
+    const count = selectedTxnIds.size
+    setTransactions(prev =>
+      prev.map(t => selectedTxnIds.has(t.id) ? { ...t, purpose } : t)
+    )
+    toast.success(`Tagged ${count} transaction${count > 1 ? 's' : ''} as "${purpose}"`)
+    setSelectedTxnIds(new Set())
+    setBulkTaggingMode(false)
+    setCustomCategoryMode(null)
+    setCustomCategoryValue("")
+  }
+
+  const handleCustomCategorySubmit = (type: 'person' | 'transaction' | 'bulk', id: string | null) => {
+    const trimmed = customCategoryValue.trim()
+    if (!trimmed) {
+      toast.error("Please enter a category name")
+      return
+    }
+
+    if (type === 'person' && id) {
+      applyPurposeToPerson(id, trimmed)
+    } else if (type === 'transaction' && id) {
+      applyPurposeToTxn(id, trimmed)
+    } else if (type === 'bulk') {
+      applyBulkPurpose(trimmed)
+    }
+
+    setCustomCategoryMode(null)
+    setCustomCategoryValue("")
   }
 
   const hasData = transactions.length > 0
@@ -264,13 +384,26 @@ export function InputPage({ onGenerate }: InputPageProps) {
             <span className="text-xs font-semibold text-slate-400 tracking-wide uppercase">
               People ({totalPeople})
             </span>
-            <button
-              onClick={() => { setTransactions([]); setImportStats(null) }}
-              className="text-xs text-slate-400 hover:text-red-500 font-medium inline-flex items-center gap-1 transition-colors"
-            >
-              <Trash2 className="w-3 h-3" />
-              Clear all
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={toggleBulkMode}
+                className={`text-xs font-medium inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
+                  bulkTaggingMode
+                    ? "bg-indigo-100 text-indigo-700 hover:bg-indigo-200"
+                    : "text-slate-500 hover:text-indigo-600 hover:bg-indigo-50"
+                }`}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                {bulkTaggingMode ? `Selected (${selectedTxnIds.size})` : "Bulk Tag"}
+              </button>
+              <button
+                onClick={() => { setTransactions([]); setImportStats(null); setBulkTaggingMode(false); setSelectedTxnIds(new Set()) }}
+                className="text-xs text-slate-400 hover:text-red-500 font-medium inline-flex items-center gap-1 transition-colors"
+              >
+                <Trash2 className="w-3 h-3" />
+                Clear all
+              </button>
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -339,38 +472,105 @@ export function InputPage({ onGenerate }: InputPageProps) {
                           Category for all {count} transfers:
                         </p>
                         <div className="flex flex-wrap gap-1.5">
-                          {PURPOSES.map(p => (
-                            <button
-                              key={p}
-                              onClick={() => applyPurposeToPerson(name, p)}
-                              className="px-3 min-h-[36px] rounded-xl text-xs font-semibold transition-all"
-                              style={
-                                purposes.includes(p) && purposes.length === 1
-                                  ? { backgroundColor: PURPOSE_COLORS[p], color: "#FFFFFF" }
-                                  : { backgroundColor: `${PURPOSE_COLORS[p]}15`, color: PURPOSE_COLORS[p] }
-                              }
-                            >
-                              {p}
-                            </button>
-                          ))}
+                          {PURPOSES.map(p => {
+                            if (p === "Other" && customCategoryMode?.type === 'person' && customCategoryMode?.id === name) {
+                              return (
+                                <input
+                                  key={p}
+                                  type="text"
+                                  value={customCategoryValue}
+                                  onChange={(e) => setCustomCategoryValue(e.target.value.slice(0, 20))}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      handleCustomCategorySubmit('person', name)
+                                    } else if (e.key === 'Escape') {
+                                      setCustomCategoryMode(null)
+                                      setCustomCategoryValue("")
+                                    }
+                                  }}
+                                  onBlur={() => {
+                                    if (customCategoryValue.trim()) {
+                                      handleCustomCategorySubmit('person', name)
+                                    } else {
+                                      setCustomCategoryMode(null)
+                                      setCustomCategoryValue("")
+                                    }
+                                  }}
+                                  autoFocus
+                                  placeholder="Type category..."
+                                  className="px-3 min-h-[36px] rounded-xl text-xs font-semibold border-2 border-slate-400 focus:border-slate-600 focus:outline-none"
+                                  style={{
+                                    backgroundColor: `${PURPOSE_COLORS[p]}15`,
+                                    color: PURPOSE_COLORS[p],
+                                    minWidth: '140px'
+                                  }}
+                                />
+                              )
+                            }
+                            return (
+                              <button
+                                key={p}
+                                onClick={() => {
+                                  if (p === "Other") {
+                                    setCustomCategoryMode({ type: 'person', id: name })
+                                    setCustomCategoryValue("")
+                                  } else {
+                                    applyPurposeToPerson(name, p)
+                                  }
+                                }}
+                                className="px-3 min-h-[36px] rounded-xl text-xs font-semibold transition-all"
+                                style={
+                                  purposes.includes(p) && purposes.length === 1
+                                    ? { backgroundColor: PURPOSE_COLORS[p], color: "#FFFFFF" }
+                                    : { backgroundColor: `${PURPOSE_COLORS[p]}15`, color: PURPOSE_COLORS[p] }
+                                }
+                              >
+                                {p}
+                              </button>
+                            )
+                          })}
                         </div>
                       </div>
 
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setExpandedPerson(expandedPerson === name ? null : name)
-                        }}
-                        className="w-full flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-indigo-500 border-t border-slate-100 hover:bg-indigo-50/50 transition-colors min-h-[40px]"
-                      >
-                        {expandedPerson === name ? "Hide" : "View"} individual transfers
-                        <svg
-                          className={`w-3.5 h-3.5 transition-transform ${expandedPerson === name ? "rotate-180" : ""}`}
-                          fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
+                      <div className="border-t border-slate-100 flex items-center">
+                        {bulkTaggingMode && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              const group = grouped.find(g => g.name === name)!
+                              const allSelected = group.txns.every(txn => selectedTxnIds.has(txn.id))
+                              if (allSelected) {
+                                deselectAllInGroup(group)
+                              } else {
+                                selectAllInGroup(group)
+                              }
+                            }}
+                            className="flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition-colors min-h-[40px] border-r border-slate-100"
+                          >
+                            {grouped.find(g => g.name === name)?.txns.every(txn => selectedTxnIds.has(txn.id)) ? (
+                              <Check className="w-3.5 h-3.5 text-indigo-600" />
+                            ) : (
+                              <Square className="w-3.5 h-3.5 text-slate-400" />
+                            )}
+                            Select All
+                          </button>
+                        )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setExpandedPerson(expandedPerson === name ? null : name)
+                          }}
+                          className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-indigo-500 hover:bg-indigo-50/50 transition-colors min-h-[40px]"
                         >
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </button>
+                          {expandedPerson === name ? "Hide" : "View"} individual transfers
+                          <svg
+                            className={`w-3.5 h-3.5 transition-transform ${expandedPerson === name ? "rotate-180" : ""}`}
+                            fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                      </div>
 
                       {expandedPerson === name && (
                         <div className="border-t border-slate-100">
@@ -382,10 +582,27 @@ export function InputPage({ onGenerate }: InputPageProps) {
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation()
-                                    setTaggingTxnId(isPickingThis ? null : txn.id)
+                                    if (bulkTaggingMode) {
+                                      toggleTxnSelection(txn.id)
+                                    } else {
+                                      setTaggingTxnId(isPickingThis ? null : txn.id)
+                                    }
                                   }}
-                                  className="w-full flex items-center gap-3 px-4 py-3 text-left min-h-[52px] hover:bg-slate-50 transition-colors"
+                                  className={`w-full flex items-center gap-3 px-4 py-3 text-left min-h-[52px] hover:bg-slate-50 transition-colors ${
+                                    bulkTaggingMode && selectedTxnIds.has(txn.id) ? "bg-indigo-50/50" : ""
+                                  }`}
                                 >
+                                  {bulkTaggingMode && (
+                                    <div className="shrink-0">
+                                      {selectedTxnIds.has(txn.id) ? (
+                                        <div className="w-5 h-5 rounded bg-indigo-600 flex items-center justify-center">
+                                          <Check className="w-3.5 h-3.5 text-white" />
+                                        </div>
+                                      ) : (
+                                        <div className="w-5 h-5 rounded border-2 border-slate-300" />
+                                      )}
+                                    </div>
+                                  )}
                                   <div className="flex-1 min-w-0">
                                     <p className="text-xs text-slate-400 tabular-nums">
                                       {new Date(txn.date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
@@ -416,20 +633,65 @@ export function InputPage({ onGenerate }: InputPageProps) {
                                   <div className="px-4 pb-3 pt-1 animate-scale-in">
                                     <p className="text-[10px] font-semibold text-slate-400 mb-2">Re-categorize this transfer:</p>
                                     <div className="flex flex-wrap gap-1">
-                                      {PURPOSES.map(p => (
-                                        <button
-                                          key={p}
-                                          onClick={(e) => { e.stopPropagation(); applyPurposeToTxn(txn.id, p) }}
-                                          className="px-2.5 min-h-[32px] rounded-lg text-[11px] font-semibold transition-all"
-                                          style={
-                                            txnPurpose === p
-                                              ? { backgroundColor: PURPOSE_COLORS[p], color: "#FFFFFF" }
-                                              : { backgroundColor: `${PURPOSE_COLORS[p]}12`, color: PURPOSE_COLORS[p] }
-                                          }
-                                        >
-                                          {p}
-                                        </button>
-                                      ))}
+                                      {PURPOSES.map(p => {
+                                        if (p === "Other" && customCategoryMode?.type === 'transaction' && customCategoryMode?.id === txn.id) {
+                                          return (
+                                            <input
+                                              key={p}
+                                              type="text"
+                                              value={customCategoryValue}
+                                              onChange={(e) => setCustomCategoryValue(e.target.value.slice(0, 20))}
+                                              onKeyDown={(e) => {
+                                                e.stopPropagation()
+                                                if (e.key === 'Enter') {
+                                                  handleCustomCategorySubmit('transaction', txn.id)
+                                                } else if (e.key === 'Escape') {
+                                                  setCustomCategoryMode(null)
+                                                  setCustomCategoryValue("")
+                                                }
+                                              }}
+                                              onBlur={() => {
+                                                if (customCategoryValue.trim()) {
+                                                  handleCustomCategorySubmit('transaction', txn.id)
+                                                } else {
+                                                  setCustomCategoryMode(null)
+                                                  setCustomCategoryValue("")
+                                                }
+                                              }}
+                                              autoFocus
+                                              placeholder="Type category..."
+                                              className="px-2.5 min-h-[32px] rounded-lg text-[11px] font-semibold border-2 border-slate-400 focus:border-slate-600 focus:outline-none"
+                                              style={{
+                                                backgroundColor: `${PURPOSE_COLORS[p]}12`,
+                                                color: PURPOSE_COLORS[p],
+                                                minWidth: '130px'
+                                              }}
+                                            />
+                                          )
+                                        }
+                                        return (
+                                          <button
+                                            key={p}
+                                            onClick={(e) => {
+                                              e.stopPropagation()
+                                              if (p === "Other") {
+                                                setCustomCategoryMode({ type: 'transaction', id: txn.id })
+                                                setCustomCategoryValue("")
+                                              } else {
+                                                applyPurposeToTxn(txn.id, p)
+                                              }
+                                            }}
+                                            className="px-2.5 min-h-[32px] rounded-lg text-[11px] font-semibold transition-all"
+                                            style={
+                                              txnPurpose === p
+                                                ? { backgroundColor: PURPOSE_COLORS[p], color: "#FFFFFF" }
+                                                : { backgroundColor: `${PURPOSE_COLORS[p]}12`, color: PURPOSE_COLORS[p] }
+                                            }
+                                          >
+                                            {p}
+                                          </button>
+                                        )
+                                      })}
                                     </div>
                                   </div>
                                 )}
@@ -517,25 +779,32 @@ export function InputPage({ onGenerate }: InputPageProps) {
                 onClick={() => fileInputRef.current?.click()}
                 className="flex flex-col items-center gap-1.5 p-3 rounded-xl hover:bg-slate-50 transition-colors group"
               >
-                <img
-                  src={`https://logo.clearbit.com/${provider.domain}`}
-                  alt={provider.name}
-                  className="w-10 h-10 rounded-xl"
-                  style={{
-                    boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-                    filter: provider.active ? "none" : "grayscale(1) opacity(0.45)",
-                  }}
-                  onError={(e) => {
-                    const target = e.target as HTMLImageElement
-                    target.style.display = "none"
-                    const fallback = target.nextElementSibling as HTMLElement
-                    if (fallback) fallback.style.display = "flex"
-                  }}
-                />
-                <div
-                  className="w-10 h-10 rounded-xl items-center justify-center text-xs font-bold bg-slate-100 text-slate-400 hidden"
-                >
-                  {provider.name.slice(0, 2).toUpperCase()}
+                <div className="relative w-10 h-10">
+                  <img
+                    src={provider.logo}
+                    alt={`${provider.name} logo`}
+                    className="w-10 h-10 rounded-xl object-contain bg-white p-1"
+                    style={{
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+                      filter: provider.active ? "none" : "grayscale(1) opacity(0.45)",
+                    }}
+                    onError={(e) => {
+                      const target = e.target as HTMLImageElement
+                      target.style.display = "none"
+                      const fallback = target.nextElementSibling as HTMLElement
+                      if (fallback) fallback.style.display = "flex"
+                    }}
+                  />
+                  <div
+                    className="w-10 h-10 rounded-xl items-center justify-center text-xl hidden"
+                    style={{
+                      backgroundColor: provider.color,
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+                      filter: provider.active ? "none" : "grayscale(1) opacity(0.45)",
+                    }}
+                  >
+                    {provider.icon}
+                  </div>
                 </div>
                 <span className="text-[11px] text-slate-500 group-hover:text-slate-700 truncate max-w-full transition-colors">
                   {provider.name}
@@ -595,6 +864,74 @@ export function InputPage({ onGenerate }: InputPageProps) {
               </button>
             </div>
           )}
+
+          {/* Bulk tagging action bar */}
+          {bulkTaggingMode && selectedTxnIds.size > 0 && (
+            <div className="mb-4 p-4 rounded-2xl bg-indigo-50 border border-indigo-100 animate-scale-in">
+              <p className="text-xs font-semibold text-indigo-700 mb-3">
+                Apply category to {selectedTxnIds.size} selected transaction{selectedTxnIds.size > 1 ? 's' : ''}:
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {PURPOSES.map(p => {
+                  if (p === "Other" && customCategoryMode?.type === 'bulk') {
+                    return (
+                      <input
+                        key={p}
+                        type="text"
+                        value={customCategoryValue}
+                        onChange={(e) => setCustomCategoryValue(e.target.value.slice(0, 20))}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            handleCustomCategorySubmit('bulk', null)
+                          } else if (e.key === 'Escape') {
+                            setCustomCategoryMode(null)
+                            setCustomCategoryValue("")
+                          }
+                        }}
+                        onBlur={() => {
+                          if (customCategoryValue.trim()) {
+                            handleCustomCategorySubmit('bulk', null)
+                          } else {
+                            setCustomCategoryMode(null)
+                            setCustomCategoryValue("")
+                          }
+                        }}
+                        autoFocus
+                        placeholder="Type category..."
+                        className="px-3 min-h-[36px] rounded-xl text-xs font-semibold border-2 border-indigo-400 focus:border-indigo-600 focus:outline-none"
+                        style={{
+                          backgroundColor: `${PURPOSE_COLORS[p]}15`,
+                          color: PURPOSE_COLORS[p],
+                          minWidth: '140px'
+                        }}
+                      />
+                    )
+                  }
+                  return (
+                    <button
+                      key={p}
+                      onClick={() => {
+                        if (p === "Other") {
+                          setCustomCategoryMode({ type: 'bulk', id: null })
+                          setCustomCategoryValue("")
+                        } else {
+                          applyBulkPurpose(p)
+                        }
+                      }}
+                      className="px-3 min-h-[36px] rounded-xl text-xs font-semibold transition-all hover:scale-105"
+                      style={{
+                        backgroundColor: `${PURPOSE_COLORS[p]}15`,
+                        color: PURPOSE_COLORS[p]
+                      }}
+                    >
+                      {p}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
           <button
             onClick={() => onGenerate(transactions)}
             disabled={!hasData}
